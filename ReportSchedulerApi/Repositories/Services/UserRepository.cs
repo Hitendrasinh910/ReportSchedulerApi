@@ -128,5 +128,27 @@ namespace ReportSchedulerApi.Repositories.Services
                 return SaveResult.Fail("Failed to delete user. " + ex.Message);
             }
         }
+
+        public async Task<UserDto?> ValidateLoginAsync(string username, string password)
+        {
+            try
+            {
+                var parameters = new DynamicParameters();
+
+                parameters.Add("@Username", username);
+                parameters.Add("@Password", password);
+
+                return await _dapper.QueryFirstOrDefaultAsync<UserDto>(
+                    "usp_User_ValidateLogin",
+                    parameters,
+                    CommandType.StoredProcedure,
+                    SchedulerDb);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Error in UserRepository.ValidateLoginAsync");
+                return null;
+            }
+        }
     }
 }

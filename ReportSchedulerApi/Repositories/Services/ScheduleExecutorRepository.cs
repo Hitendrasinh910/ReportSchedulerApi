@@ -17,19 +17,23 @@ using System.Xml.Linq;
 
 namespace ReportSchedulerApi.Repositories.Services
 {
-    public class ScheduleExecutorService : IScheduleExecutorService
+    public class ScheduleExecutorRepository : IScheduleExecutorRepository
     {
         private const string SchedulerDb = "ReportSchedulerDb";
         private const string BillingDb = "AiraBillingDb";
+        private class ScheduleExecutionContext
+        {
+            public List<string> SentContactNos { get; set; } = new();
+        }
 
         private readonly IDapperHelper _dapper;
         private readonly INotificationApiService _notificationApiService;
-        private readonly ILogger<ScheduleExecutorService> _logger;
+        private readonly ILogger<ScheduleExecutorRepository> _logger;
 
-        public ScheduleExecutorService(
+        public ScheduleExecutorRepository(
             IDapperHelper dapper,
             INotificationApiService notificationApiService,
-            ILogger<ScheduleExecutorService> logger)
+            ILogger<ScheduleExecutorRepository> logger)
         {
             _dapper = dapper;
             _notificationApiService = notificationApiService;
@@ -65,6 +69,7 @@ namespace ReportSchedulerApi.Repositories.Services
                         schedule.ScheduleName,
                         "Failed",
                         ex.Message,
+                        null,
                         null,
                         DateTime.Now,
                         DateTime.Now);
@@ -119,6 +124,7 @@ namespace ReportSchedulerApi.Repositories.Services
         private async Task ExecuteScheduleInternalAsync(ReportScheduleDto schedule)
         {
             var startedOn = DateTime.Now;
+            var context = new ScheduleExecutionContext();
 
             await SaveRunLogAsync(
                 schedule.IDSchedule,
@@ -126,43 +132,67 @@ namespace ReportSchedulerApi.Repositories.Services
                 "Started",
                 "Schedule execution started.",
                 null,
+                null,
                 startedOn,
                 null);
 
-            var parameters = await GetScheduleParametersAsync(schedule.IDSchedule);
-            var recipients = await GetScheduleRecipientsAsync(schedule.IDSchedule);
-
-            var spParams = BuildStoredProcedureParameters(schedule, parameters);
-
-            var rows = await ExecuteConfiguredStoredProcedureAsync(
-                schedule.StoredProcedureName,
-                spParams);
-
-            if (schedule.OutputType == "Message")
+            try
             {
-                await SendMessageScheduleAsync(schedule, rows, recipients);
-            }
-            else if (schedule.OutputType == "Report")
-            {
-                await SendReportScheduleAsync(schedule, rows, recipients);
-            }
-            else
-            {
-                throw new Exception("Invalid OutputType.");
-            }
+                var parameters = await GetScheduleParametersAsync(schedule.IDSchedule);
+                var recipients = await GetScheduleRecipientsAsync(schedule.IDSchedule);
 
-            await SaveRunLogAsync(
-                schedule.IDSchedule,
-                schedule.ScheduleName,
-                "Success",
-                "Schedule executed successfully.",
-                JsonConvert.SerializeObject(new
+                var spParams = BuildStoredProcedureParameters(schedule, parameters);
+
+                var rows = await ExecuteConfiguredStoredProcedureAsync(
+                    schedule.StoredProcedureName,
+                    spParams);
+
+                if (schedule.OutputType == "Message")
                 {
-                    RowCount = rows.Count,
-                    schedule.OutputType
-                }),
-                startedOn,
-                DateTime.Now);
+                    await SendMessageScheduleAsync(schedule, rows, recipients, context);
+                }
+                else if (schedule.OutputType == "Report")
+                {
+                    await SendReportScheduleAsync(schedule, rows, recipients, context);
+                }
+                else
+                {
+                    throw new Exception("Invalid OutputType.");
+                }
+
+                var sentContactNos = string.Join(",", context.SentContactNos.Distinct());
+
+                await SaveRunLogAsync(
+                    schedule.IDSchedule,
+                    schedule.ScheduleName,
+                    "Success",
+                    "Schedule executed successfully.",
+                    JsonConvert.SerializeObject(new
+                    {
+                        RowCount = rows.Count,
+                        schedule.OutputType,
+                        SentCount = context.SentContactNos.Distinct().Count()
+                    }),
+                    sentContactNos,
+                    startedOn,
+                    DateTime.Now);
+            }
+            catch (Exception ex)
+            {
+                var sentContactNos = string.Join(",", context.SentContactNos.Distinct());
+
+                await SaveRunLogAsync(
+                    schedule.IDSchedule,
+                    schedule.ScheduleName,
+                    "Failed",
+                    ex.Message,
+                    null,
+                    sentContactNos,
+                    startedOn,
+                    DateTime.Now);
+
+                throw;
+            }
         }
 
         private async Task<List<ReportScheduleParameterDto>> GetScheduleParametersAsync(int idSchedule)
@@ -280,7 +310,8 @@ namespace ReportSchedulerApi.Repositories.Services
         private async Task SendMessageScheduleAsync(
     ReportScheduleDto schedule,
     List<IDictionary<string, object>> rows,
-    List<ReportScheduleRecipientDto> recipients)
+    List<ReportScheduleRecipientDto> recipients,
+    ScheduleExecutionContext context)
         {
             if (rows.Count == 0)
                 throw new Exception("SP returned no rows.");
@@ -323,6 +354,8 @@ namespace ReportSchedulerApi.Repositories.Services
                             category: "Atlas",
                             subCategory: "Message",
                             forceSend: true);
+
+                        AddSentContacts(context, rowPhones);
                     }
 
                     return;
@@ -367,6 +400,8 @@ namespace ReportSchedulerApi.Repositories.Services
                         category: "Atlas",
                         subCategory: "Message",
                         forceSend: true);
+
+                    AddSentContacts(context, sendPhones);
                 }
 
                 return;
@@ -391,6 +426,8 @@ namespace ReportSchedulerApi.Repositories.Services
                 category: "Atlas",
                 subCategory: "Message",
                 forceSend: true);
+
+            AddSentContacts(context, configuredPhones);
         }
 
         private bool ShouldUseSpMobileNumbers(ReportScheduleDto schedule)
@@ -402,7 +439,8 @@ namespace ReportSchedulerApi.Repositories.Services
         private async Task SendReportScheduleAsync(
             ReportScheduleDto schedule,
             List<IDictionary<string, object>> rows,
-            List<ReportScheduleRecipientDto> recipients)
+            List<ReportScheduleRecipientDto> recipients,
+            ScheduleExecutionContext context)
         {
             if (rows.Count == 0)
                 throw new Exception("SP returned no rows.");
@@ -455,6 +493,8 @@ namespace ReportSchedulerApi.Repositories.Services
                 documentName: fileName,
                 mimeType: "application/pdf",
                 base64Data: base64Pdf);
+
+            AddSentContacts(context, allPhones);
         }
 
         private string ApplyTemplate(
@@ -678,6 +718,7 @@ namespace ReportSchedulerApi.Repositories.Services
             string status,
             string? message,
             string? detailsJson,
+            string? sentContactNos,
             DateTime? startedOn,
             DateTime? completedOn)
         {
@@ -688,6 +729,7 @@ namespace ReportSchedulerApi.Repositories.Services
             param.Add("@Status", status);
             param.Add("@Message", message);
             param.Add("@DetailsJson", detailsJson);
+            param.Add("@SentContactNos", sentContactNos);
             param.Add("@StartedOn", startedOn);
             param.Add("@CompletedOn", completedOn);
 
@@ -754,6 +796,24 @@ namespace ReportSchedulerApi.Repositories.Services
             }
 
             return string.Join("\n", lines);
+        }
+
+        private void AddSentContacts(
+    ScheduleExecutionContext context,
+    List<string> phones)
+        {
+            if (phones == null || phones.Count == 0)
+                return;
+
+            context.SentContactNos.AddRange(
+                phones
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Select(x => x.Trim())
+            );
+
+            context.SentContactNos = context.SentContactNos
+                .Distinct()
+                .ToList();
         }
 
         private string CleanNotificationText(string? value)

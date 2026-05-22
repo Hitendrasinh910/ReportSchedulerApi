@@ -4,7 +4,7 @@ using ReportSchedulerApi.Models.DTOs;
 
 namespace ReportSchedulerApi.Repositories.Interfaces
 {
-    public interface IReportScheduleRepo
+    public interface IReportScheduleRepository
     {
         Task<IEnumerable<ReportScheduleDto>> GetAllAsync(string search = "", int pageNumber = 1, int pageSize = 10);
 

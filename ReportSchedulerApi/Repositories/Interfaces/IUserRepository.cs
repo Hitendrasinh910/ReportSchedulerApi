@@ -15,5 +15,7 @@ namespace ReportSchedulerApi.Repositories.Interfaces
         Task<SaveResult> SaveAsync(UserDto model);
 
         Task<SaveResult> DeleteAsync(int userId, string deletedBy);
+
+        Task<UserDto?> ValidateLoginAsync(string username, string password);
     }
 }

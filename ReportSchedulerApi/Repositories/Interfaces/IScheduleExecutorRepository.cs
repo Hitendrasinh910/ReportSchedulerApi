@@ -1,6 +1,6 @@
 ﻿namespace ReportSchedulerApi.Repositories.Interfaces
 {
-    public interface IScheduleExecutorService
+    public interface IScheduleExecutorRepository
     {
         Task ExecuteDueSchedulesAsync();
         Task ExecuteScheduleAsync(int idSchedule);

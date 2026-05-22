@@ -8,9 +8,9 @@ namespace ReportSchedulerApi.Controllers
     [ApiController]
     public class ScheduleExecutorController : ControllerBase
     {
-        private readonly IScheduleExecutorService _executor;
+        private readonly IScheduleExecutorRepository _executor;
 
-        public ScheduleExecutorController(IScheduleExecutorService executor)
+        public ScheduleExecutorController(IScheduleExecutorRepository executor)
         {
             _executor = executor;
         }

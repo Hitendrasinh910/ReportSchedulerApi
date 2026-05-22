@@ -5,7 +5,7 @@ using ReportSchedulerApi.Models.DTOs;
 using ReportSchedulerApi.Repositories.Interfaces;
 using System.Data;
 
-public class ReportScheduleRepository : IReportScheduleRepo
+public class ReportScheduleRepository : IReportScheduleRepository
 {
     private const string SchedulerDb = "ReportSchedulerDb";
 

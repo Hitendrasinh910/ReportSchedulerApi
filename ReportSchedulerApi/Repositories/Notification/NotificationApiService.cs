@@ -103,8 +103,8 @@ namespace ReportSchedulerApi.Repositories.Notification
                     NullValueHandling = NullValueHandling.Ignore
                 });
 
-            Console.WriteLine("Notification API Payload:");
-            Console.WriteLine(json);
+            //Console.WriteLine("Notification API Payload:");
+            //Console.WriteLine(json);
 
             using var request = new HttpRequestMessage(HttpMethod.Post, apiUrl);
 
@@ -117,11 +117,11 @@ namespace ReportSchedulerApi.Repositories.Notification
             var response = await _client.SendAsync(request);
             var result = await response.Content.ReadAsStringAsync();
 
-            Console.WriteLine("Notification API Status:");
-            Console.WriteLine(response.StatusCode);
+            //Console.WriteLine("Notification API Status:");
+            //Console.WriteLine(response.StatusCode);
 
-            Console.WriteLine("Notification API Response:");
-            Console.WriteLine(result);
+            //Console.WriteLine("Notification API Response:");
+            //Console.WriteLine(result);
 
             if (!response.IsSuccessStatusCode)
             {
@@ -158,3 +158,4 @@ namespace ReportSchedulerApi.Repositories.Notification
         }
     }
 }
+             

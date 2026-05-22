@@ -41,7 +41,7 @@ namespace ReportSchedulerApi.Services
                     using var scope = _serviceProvider.CreateScope();
 
                     var executor = scope.ServiceProvider
-                        .GetRequiredService<IScheduleExecutorService>();
+                        .GetRequiredService<IScheduleExecutorRepository>();
 
                     await executor.ExecuteDueSchedulesAsync();
                 }

@@ -10,8 +10,7 @@ using ReportSchedulerApi.Models.DTOs;
 using ReportSchedulerApi.Repositories.Interfaces;
 using ReportSchedulerApi.Repositories.Notification;
 using System.Data;
-using System.Data.Common;
-using System.Text.RegularExpressions;
+using System.Data.Common;                       
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 
@@ -436,65 +435,191 @@ namespace ReportSchedulerApi.Repositories.Services
                 || schedule.ReceiverSource == "Mixed";
         }
 
-        private async Task SendReportScheduleAsync(
-            ReportScheduleDto schedule,
-            List<IDictionary<string, object>> rows,
-            List<ReportScheduleRecipientDto> recipients,
-            ScheduleExecutionContext context)
+        //private async Task SendReportScheduleAsync(
+        //    ReportScheduleDto schedule,
+        //    List<IDictionary<string, object>> rows,
+        //    List<ReportScheduleRecipientDto> recipients,
+        //    ScheduleExecutionContext context)
+        //{
+        //    if (rows.Count == 0)
+        //        throw new Exception("SP returned no rows.");
+
+        //    //var phonesFromSp = ResolvePhonesFromRows(schedule, rows);
+        //    var configuredPhones = await ResolveConfiguredRecipientPhonesAsync(schedule, recipients);
+        //    var allPhones = new List<string>();
+
+        //    if (ShouldUseSpMobileNumbers(schedule))
+        //    {
+        //        var phonesFromSp = ResolvePhonesFromRows(schedule, rows);
+        //        allPhones.AddRange(phonesFromSp);
+        //    }
+
+        //    allPhones.AddRange(configuredPhones);
+        //    allPhones = CleanPhones(allPhones);
+
+        //    if (allPhones.Count == 0)
+        //        throw new Exception("No recipient phone numbers found.");
+
+        //    var columns = BuildPdfColumns(rows);
+        //    var pdfRows = BuildPdfRows(rows, columns);
+
+        //    var dateRange = ResolveDateRange(schedule.DateRangeType, schedule.CustomDays);
+
+        //    using var pdfStream = AtlasReportHelper.GenerateTableReport(
+        //        schedule.PdfTitle ?? schedule.ScheduleName ?? "Report",
+        //        dateRange.FromDate,
+        //        dateRange.ToDate,
+        //        columns,
+        //        pdfRows);
+
+        //    var pdfBytes = pdfStream.ToArray();
+        //    var base64Pdf = Convert.ToBase64String(pdfBytes);
+
+        //    var fileName = schedule.PdfFileName;
+
+        //    if (string.IsNullOrWhiteSpace(fileName))
+        //        fileName = $"{schedule.ScheduleName}_{DateTime.Now:yyyyMMddHHmm}.pdf";
+
+        //    await _notificationApiService.SendNotificationAsync(
+        //        subject: schedule.PdfTitle ?? schedule.ScheduleName ?? "Report", //schedule.MessageSubject
+        //        header: schedule.PdfTitle ?? "Report", // schedule.MessageHeader
+        //        message: schedule.MessageTemplate ?? "Please find attached report.",
+        //        footer: "This is a system generated report.",
+        //        userPhones: allPhones,
+        //        category: "Atlas",
+        //        subCategory: "Report",
+        //        forceSend: true,
+        //        documentName: fileName,
+        //        mimeType: "application/pdf",
+        //        base64Data: base64Pdf);
+
+        //    AddSentContacts(context, allPhones);
+        //}
+
+        private async Task SendReportScheduleAsync(ReportScheduleDto schedule, List<IDictionary<string, object>> rows, List<ReportScheduleRecipientDto> recipients, ScheduleExecutionContext context)
         {
             if (rows.Count == 0)
                 throw new Exception("SP returned no rows.");
 
-            //var phonesFromSp = ResolvePhonesFromRows(schedule, rows);
-            var configuredPhones = await ResolveConfiguredRecipientPhonesAsync(schedule, recipients);
-            var allPhones = new List<string>();
-
-            if (ShouldUseSpMobileNumbers(schedule))
-            {
-                var phonesFromSp = ResolvePhonesFromRows(schedule, rows);
-                allPhones.AddRange(phonesFromSp);
-            }
-
-            allPhones.AddRange(configuredPhones);
-            allPhones = CleanPhones(allPhones);
-
-            if (allPhones.Count == 0)
-                throw new Exception("No recipient phone numbers found.");
-
-            var columns = BuildPdfColumns(rows);
-            var pdfRows = BuildPdfRows(rows, columns);
-
             var dateRange = ResolveDateRange(schedule.DateRangeType, schedule.CustomDays);
 
-            using var pdfStream = AtlasReportHelper.GenerateTableReport(
+            bool useSpPhones = ShouldUseSpMobileNumbers(schedule);
+
+            // DISTINCT MODE:
+            // Same ContactNo wise rows group karo,
+            // and each ContactNo ne only tena rows no PDF send karo.
+            if (useSpPhones &&
+                schedule.SpMobileMode == "Distinct" &&
+                !string.IsNullOrWhiteSpace(schedule.MobileColumnName) &&
+                rows.Any(x => x.ContainsKey(schedule.MobileColumnName)))
+            {
+                var groupedRows = rows
+                    .SelectMany(row =>
+                    {
+                        var phones = ResolvePhonesForSingleRow(schedule, row);
+
+                        return phones.Select(phone => new
+                        {
+                            Phone = phone,
+                            Row = row
+                        });
+                    })
+                    .GroupBy(x => x.Phone);
+
+                foreach (var group in groupedRows)
+                {
+                    var phone = group.Key;
+                    var phoneRows = group.Select(x => x.Row).ToList();
+
+                    var sendPhones = CleanPhones(new List<string> { phone });
+
+                    if (sendPhones.Count == 0)
+                        continue;
+
+                    var columns = BuildPdfColumns(phoneRows, schedule.MobileColumnName);
+                    var pdfRows = BuildPdfRows(phoneRows, columns);
+
+                    using var pdfStream = AtlasReportHelper.GenerateTableReport(
+                        schedule.PdfTitle ?? schedule.ScheduleName ?? "Report",
+                        dateRange.FromDate,
+                        dateRange.ToDate,
+                        columns,
+                        pdfRows);
+
+                    var pdfBytes = pdfStream.ToArray();
+                    var base64Pdf = Convert.ToBase64String(pdfBytes);
+
+                    var fileName = schedule.PdfFileName;
+
+                    if (string.IsNullOrWhiteSpace(fileName))
+                        fileName = $"{schedule.ScheduleName}_{phone}_{DateTime.Now:yyyyMMddHHmm}.pdf";
+
+                    if (!fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+                        fileName += ".pdf";
+
+                    await _notificationApiService.SendNotificationAsync(
+                        subject: schedule.PdfTitle ?? schedule.ScheduleName ?? "Report",
+                        header: schedule.PdfTitle ?? "Report",
+                        message: schedule.MessageTemplate ?? "Please find attached report.",
+                        footer: "This is a system generated report.",
+                        userPhones: sendPhones,
+                        category: "Atlas",
+                        subCategory: "Report",
+                        forceSend: true,
+                        documentName: fileName,
+                        mimeType: "application/pdf",
+                        base64Data: base64Pdf);
+
+                    AddSentContacts(context, sendPhones);
+                }
+
+                return;
+            }
+
+            // NORMAL MODE:
+            // Custom/User/PartyAccount or non-distinct mode:
+            // common PDF send to configured phones.
+            var configuredPhones = await ResolveConfiguredRecipientPhonesAsync(schedule, recipients);
+            configuredPhones = CleanPhones(configuredPhones);
+
+            if (configuredPhones.Count == 0)
+                throw new Exception("No recipient phone numbers found.");
+
+            var commonColumns = BuildPdfColumns(rows, schedule.MobileColumnName);
+            var commonPdfRows = BuildPdfRows(rows, commonColumns);
+
+            using var commonPdfStream = AtlasReportHelper.GenerateTableReport(
                 schedule.PdfTitle ?? schedule.ScheduleName ?? "Report",
                 dateRange.FromDate,
                 dateRange.ToDate,
-                columns,
-                pdfRows);
+                commonColumns,
+                commonPdfRows);
 
-            var pdfBytes = pdfStream.ToArray();
-            var base64Pdf = Convert.ToBase64String(pdfBytes);
+            var commonPdfBytes = commonPdfStream.ToArray();
+            var commonBase64Pdf = Convert.ToBase64String(commonPdfBytes);
 
-            var fileName = schedule.PdfFileName;
+            var commonFileName = schedule.PdfFileName;
 
-            if (string.IsNullOrWhiteSpace(fileName))
-                fileName = $"{schedule.ScheduleName}_{DateTime.Now:yyyyMMddHHmm}.pdf";
+            if (string.IsNullOrWhiteSpace(commonFileName))
+                commonFileName = $"{schedule.ScheduleName}_{DateTime.Now:yyyyMMddHHmm}.pdf";
+
+            if (!commonFileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+                commonFileName += ".pdf";
 
             await _notificationApiService.SendNotificationAsync(
-                subject: schedule.PdfTitle ?? schedule.ScheduleName ?? "Report", //schedule.MessageSubject
-                header: schedule.PdfTitle ?? "Report", // schedule.MessageHeader
+                subject: schedule.PdfTitle ?? schedule.ScheduleName ?? "Report",
+                header: schedule.PdfTitle ?? "Report",
                 message: schedule.MessageTemplate ?? "Please find attached report.",
                 footer: "This is a system generated report.",
-                userPhones: allPhones,
+                userPhones: configuredPhones,
                 category: "Atlas",
                 subCategory: "Report",
                 forceSend: true,
-                documentName: fileName,
+                documentName: commonFileName,
                 mimeType: "application/pdf",
-                base64Data: base64Pdf);
+                base64Data: commonBase64Pdf);
 
-            AddSentContacts(context, allPhones);
+            AddSentContacts(context, configuredPhones);
         }
 
         private string ApplyTemplate(
@@ -674,12 +799,14 @@ namespace ReportSchedulerApi.Repositories.Services
                 .ToList();
         }
 
-        private List<PdfColumn> BuildPdfColumns(List<IDictionary<string, object>> rows)
+        private List<PdfColumn> BuildPdfColumns(List<IDictionary<string, object>> rows, string? mobileColumnName = null)
         {
             var firstRow = rows.First();
 
             return firstRow.Keys
-                .Where(x => !string.Equals(x, "ContactNo", StringComparison.OrdinalIgnoreCase))
+                .Where(x =>
+                    !string.Equals(x, "ContactNo", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(x, mobileColumnName, StringComparison.OrdinalIgnoreCase))
                 .Select(x => new PdfColumn
                 {
                     Header = x,
@@ -688,6 +815,20 @@ namespace ReportSchedulerApi.Repositories.Services
                 })
                 .ToList();
         }
+        //private List<PdfColumn> BuildPdfColumns(List<IDictionary<string, object>> rows)
+        //{
+        //    var firstRow = rows.First();
+
+        //    return firstRow.Keys
+        //        .Where(x => !string.Equals(x, "ContactNo", StringComparison.OrdinalIgnoreCase))
+        //        .Select(x => new PdfColumn
+        //        {
+        //            Header = x,
+        //            Width = 2f,
+        //            Alignment = Element.ALIGN_CENTER
+        //        })
+        //        .ToList();
+        //}
 
         private List<List<string>> BuildPdfRows(
             List<IDictionary<string, object>> rows,

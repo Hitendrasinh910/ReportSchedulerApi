@@ -49,6 +49,11 @@
         public bool IsActive { get; set; }
         public int? E_By { get; set; }
 
+        // Last cron occurrence this schedule actually claimed. Due-ness is
+        // anchored on this rather than on the wall clock, so an app restart
+        // replays missed runs instead of silently losing them.
+        public DateTime? LastRunOn { get; set; }
+
         public int TotalCount { get; set; } // for Pagination
 
         public List<ReportScheduleParameterDto> Parameters { get; set; } = new();

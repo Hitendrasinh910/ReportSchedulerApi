@@ -28,15 +28,18 @@ namespace ReportSchedulerApi.Repositories.Services
         private readonly IDapperHelper _dapper;
         private readonly INotificationApiService _notificationApiService;
         private readonly ILogger<ScheduleExecutorRepository> _logger;
+        private readonly IConfiguration _configuration;
 
         public ScheduleExecutorRepository(
             IDapperHelper dapper,
             INotificationApiService notificationApiService,
-            ILogger<ScheduleExecutorRepository> logger)
+            ILogger<ScheduleExecutorRepository> logger,
+            IConfiguration configuration)
         {
             _dapper = dapper;
             _notificationApiService = notificationApiService;
             _logger = logger;
+            _configuration = configuration;
         }
 
         public async Task ExecuteDueSchedulesAsync()
@@ -47,11 +50,24 @@ namespace ReportSchedulerApi.Repositories.Services
                 CommandType.StoredProcedure,
                 SchedulerDb);
 
+            var now = DateTimeOffset.Now;
+
             foreach (var schedule in schedules)
             {
                 try
                 {
-                    if (!IsScheduleDue(schedule))
+                    var occurrence = GetDueOccurrence(schedule, now);
+
+                    if (occurrence == null)
+                        continue;
+
+                    // Claim the occurrence before doing any work. Writing
+                    // LastRunOn first gives at-most-once delivery: if this
+                    // process is killed mid-run (app-pool recycle, crash),
+                    // the occurrence is already spent and will not be
+                    // re-sent when Hangfire re-dispatches the job. For
+                    // notification blasts a duplicate is worse than a miss.
+                    if (!await TryClaimRunAsync(schedule, occurrence.Value))
                         continue;
 
                     await ExecuteScheduleInternalAsync(schedule);
@@ -93,31 +109,120 @@ namespace ReportSchedulerApi.Repositories.Services
             await ExecuteScheduleInternalAsync(schedule);
         }
 
-        private bool IsScheduleDue(ReportScheduleDto schedule)
+        /// <summary>
+        /// Returns the cron occurrence this schedule owes a run for, or null
+        /// if nothing is due.
+        ///
+        /// Due-ness is anchored on LastRunOn rather than on a 60-second
+        /// wall-clock window. That is what lets the scheduler survive a
+        /// restart: if the app was down when an occurrence passed, the
+        /// occurrence is still outstanding when it comes back up, and gets
+        /// run then. The old window-based check dropped it permanently.
+        ///
+        /// Catch-up is bounded by SchedulerWorker:CatchUpWindowMinutes so a
+        /// multi-day outage does not replay days of backlogged notifications
+        /// the moment the app returns.
+        /// </summary>
+        private DateTimeOffset? GetDueOccurrence(ReportScheduleDto schedule, DateTimeOffset now)
         {
             if (string.IsNullOrWhiteSpace(schedule.CronExpression))
-                return false;
+                return null;
+
+            CronExpression cron;
 
             try
             {
-                var cron = CronExpression.Parse(
+                cron = CronExpression.Parse(
                     schedule.CronExpression,
                     CronFormat.IncludeSeconds);
-
-                var now = DateTimeOffset.Now;
-                var from = now.AddMinutes(-1);
-
-                var next = cron.GetNextOccurrence(from, TimeZoneInfo.Local);
-
-                if (next == null)
-                    return false;
-
-                return next.Value <= now;
             }
-            catch
+            catch (Exception ex)
             {
+                // Previously swallowed silently, which left a schedule dead
+                // forever with nothing logged anywhere. Surface it instead.
+                _logger.LogError(
+                    ex,
+                    "Invalid cron expression, schedule will never run. IDSchedule={IDSchedule}, ScheduleName={ScheduleName}, CronExpression={CronExpression}",
+                    schedule.IDSchedule,
+                    schedule.ScheduleName,
+                    schedule.CronExpression);
+
+                return null;
+            }
+
+            var catchUpMinutes = _configuration.GetValue<int?>("SchedulerWorker:CatchUpWindowMinutes") ?? 120;
+            var earliestCatchUp = now.AddMinutes(-Math.Abs(catchUpMinutes));
+
+            DateTimeOffset anchor;
+
+            if (schedule.LastRunOn.HasValue)
+            {
+                var lastRun = schedule.LastRunOn.Value;
+
+                anchor = new DateTimeOffset(
+                    lastRun,
+                    TimeZoneInfo.Local.GetUtcOffset(lastRun));
+            }
+            else
+            {
+                // Never run before: only consider the immediate past so a
+                // newly created schedule does not fire for historic slots.
+                anchor = now.AddMinutes(-1);
+            }
+
+            if (anchor < earliestCatchUp)
+            {
+                _logger.LogWarning(
+                    "Schedule missed occurrences beyond the catch-up window and they will be skipped. IDSchedule={IDSchedule}, LastRunOn={LastRunOn}, CatchUpWindowMinutes={CatchUpWindowMinutes}",
+                    schedule.IDSchedule,
+                    schedule.LastRunOn,
+                    catchUpMinutes);
+
+                anchor = earliestCatchUp;
+            }
+
+            // Exclusive of the anchor, so the occurrence already recorded in
+            // LastRunOn is never handed out twice.
+            var next = cron.GetNextOccurrence(anchor, TimeZoneInfo.Local);
+
+            if (next == null || next.Value > now)
+                return null;
+
+            return next.Value;
+        }
+
+        /// <summary>
+        /// Records the occurrence against the schedule. The stored procedure
+        /// only updates when LastRunOn still holds the value this instance
+        /// read, so if two Hangfire servers race for the same occurrence
+        /// exactly one of them wins and the other skips.
+        /// </summary>
+        private async Task<bool> TryClaimRunAsync(ReportScheduleDto schedule, DateTimeOffset occurrence)
+        {
+            var param = new DynamicParameters();
+            param.Add("@IDSchedule", schedule.IDSchedule);
+            param.Add("@OccurrenceOn", occurrence.LocalDateTime);
+            param.Add("@ExpectedLastRun", schedule.LastRunOn);
+
+            var claimed = await _dapper.ExecuteScalarAsync<int>(
+                "usp_ReportSchedule_ClaimRun",
+                param,
+                CommandType.StoredProcedure,
+                SchedulerDb);
+
+            if (claimed == 0)
+            {
+                _logger.LogInformation(
+                    "Occurrence already claimed by another instance, skipping. IDSchedule={IDSchedule}, Occurrence={Occurrence}",
+                    schedule.IDSchedule,
+                    occurrence);
+
                 return false;
             }
+
+            schedule.LastRunOn = occurrence.LocalDateTime;
+
+            return true;
         }
 
         private async Task ExecuteScheduleInternalAsync(ReportScheduleDto schedule)

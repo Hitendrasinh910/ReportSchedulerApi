@@ -32,6 +32,11 @@ builder.Services.AddScoped<IScheduleExecutorRepository, ScheduleExecutorReposito
 // Hangfire job class
 builder.Services.AddScoped<ReportSchedulerJob>();
 
+// Liveness record + the service that registers the recurring sweep and
+// keeps a heartbeat in the log.
+builder.Services.AddSingleton<SchedulerHealthState>();
+builder.Services.AddHostedService<SchedulerBootstrapService>();
+
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("ReportSchedulerUi", policy =>
@@ -121,10 +126,42 @@ app.UseHangfireDashboard("/hangfire");
 
 app.MapControllers();
 
-// Run job every minute
-RecurringJob.AddOrUpdate<ReportSchedulerJob>(
-    "execute-due-report-schedules",
-    job => job.ExecuteDueSchedulesAsync(),
-    Cron.Minutely);
+// Liveness probe for the external watchdog. Deliberately anonymous and
+// cheap: the watchdog calls it every few minutes both to confirm the
+// scheduler is still dispatching and to keep the IIS worker process warm.
+app.MapGet("/health/scheduler", (SchedulerHealthState health, IConfiguration config) =>
+{
+    var now = DateTime.UtcNow;
+    var lastRun = health.LastJobRunUtc;
+
+    // The sweep runs every minute; allow generous slack before calling it
+    // stalled so a single slow run does not trip the watchdog.
+    var stalledAfter = TimeSpan.FromMinutes(
+        config.GetValue<int?>("SchedulerWorker:StalledAfterMinutes") ?? 10);
+
+    var startupGrace = health.ProcessStartedUtc.AddMinutes(3) > now;
+
+    var healthy = health.RecurringJobRegistered
+                  && (startupGrace || (lastRun.HasValue && now - lastRun.Value < stalledAfter));
+
+    var payload = new
+    {
+        status = healthy ? "Healthy" : "Stalled",
+        processStartedUtc = health.ProcessStartedUtc,
+        recurringJobRegistered = health.RecurringJobRegistered,
+        lastJobRunUtc = lastRun,
+        lastHeartbeatUtc = health.LastHeartbeatUtc,
+        secondsSinceLastJobRun = lastRun.HasValue
+            ? (int?)(now - lastRun.Value).TotalSeconds
+            : null,
+        serverTimeUtc = now
+    };
+
+    return healthy ? Results.Ok(payload) : Results.Json(payload, statusCode: 503);
+}).AllowAnonymous();
+
+// NOTE: the recurring job is registered by SchedulerBootstrapService rather
+// than here. Registering inline meant an unreachable SQL Server at startup
+// took the whole application down instead of retrying.
 
 app.Run();
